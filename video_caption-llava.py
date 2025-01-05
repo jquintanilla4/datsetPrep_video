@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import os
 import csv
+import re
 from pathlib import Path
 # from huggingface_hub import hf_hub_download
 from transformers import LlavaNextVideoProcessor, LlavaNextVideoForConditionalGeneration
@@ -62,7 +63,7 @@ def process_video(video_path, model, processor, csv_path):
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Please describe what is happening in this video"},
+                    {"type": "text", "text": "Please describe what is happening in this video. Be consice, yet detailed."},
                     {"type": "video"},
                 ],
             },
@@ -71,19 +72,17 @@ def process_video(video_path, model, processor, csv_path):
         
         # Sample frames
         total_frames = container.streams.video[0].frames # Get the total number of frames in the video
-        indices = np.arange(0, total_frames, total_frames / 8).astype(int) # Sample 8 frames from the video
+        indices = np.arange(0, total_frames, total_frames / 8).astype(int) # Sample 8 frames from the video, we can sample more frames for longer videos
         clip = read_video_pyav(container, indices) # Read the sampled frames
         
         # Process video and generate description
         inputs_video = processor(text=prompt, videos=clip, padding=True, return_tensors="pt").to(model.device)
-        output = model.generate(**inputs_video, max_new_tokens=100, do_sample=False)
-        description = processor.decode(output[0][2:], skip_special_tokens=True)
+        output = model.generate(**inputs_video, max_new_tokens=200, do_sample=False, num_beams=3) # deterministic generation
+        full_response = processor.decode(output[0], skip_special_tokens=True)
         
-        # Remove the prefix from the description
-        # TODO: Test in a Jupyter Notebook, if there's a better way to remove the prefix
-        prefix = "Please describe what is happening in this video ASSISTANT: In the video, we see"
-        if description.startswith(prefix):
-            description = description[len(prefix):]
+        assistant_response = full_response.split("ASSISTANT: ")[-1]  # Get everything after "ASSISTANT: "
+        # use regex to remove the "In the video, we see" prefix
+        description = re.sub(r'^In the video,\s+we see\s+', '', assistant_response)
         
         # Save description to text file
         output_path = video_path.with_suffix('.txt')
@@ -119,7 +118,7 @@ def save_to_csv(filename, video_name, caption):
 def main():
     # Get video directory from user
     while True:
-        video_dir = input("Enter the path to the directory containing the videos: ").strip()
+        video_dir = input("Enter the directory path containing the videos: ").strip()
 
         # Remove quotes if present
         video_dir = video_dir.replace('"', '').replace("'", '').replace('`', '')
