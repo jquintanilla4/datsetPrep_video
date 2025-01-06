@@ -85,11 +85,13 @@ def process_video(input_path, output_dir, max_frames):
 def convert_to_h264(output_dir):
     """Convert all mp4v encoded videos in the output directory to h264"""
     try:
-        # Test if ffmpeg is available
-        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+        # Specify the full path to system FFmpeg
+        FFMPEG_PATH = '/usr/bin/ffmpeg'  # run which ffmpeg to find the path
+        subprocess.run([FFMPEG_PATH, '-version'],
+                       capture_output=True, check=True)
     except (subprocess.CalledProcessError, FileNotFoundError):
-        logger.error("FFmpeg is not installed or not in PATH. Skipping conversion.")
-        return False
+        logger.error("FFmpeg is not installed or not in PATH")
+        raise RuntimeError("FFmpeg is required but not found")
 
     logger.info("\nConverting videos to H.264...")
     videos = list(Path(output_dir).glob("*.mp4"))
@@ -100,10 +102,11 @@ def convert_to_h264(output_dir):
         
         # FFmpeg command for h264 conversion
         cmd = [
-            'ffmpeg', '-y',
+            FFMPEG_PATH,
+            '-y',
             '-i', str(video_path),
             '-c:v', 'libx264',
-            '-crf', '21',
+            '-crf', '19',
             '-c:a', 'copy',
             str(temp_path)
         ]
