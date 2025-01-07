@@ -11,8 +11,8 @@ import csv
 
 # Configuration parameters
 CONFIG = {
-    # Video processing - optimized for 4090
-    'DOWNSCALE_FACTOR': 1,      # Reduced since 4090 can handle full resolution
+    # Video processing - optimized for speed and quality (reference hardware is 4090)
+    'DOWNSCALE_FACTOR': 1,      # 1 for full resolution, 2 for half, 4 for quarter
     'THREADS': 32,              # Increased for better CPU utilization
 
     # Detection parameters - tuned for better accuracy/speed balance
@@ -31,8 +31,7 @@ logger = logging.getLogger(__name__)
 # setup ffmpeg path
 try:
     FFMPEG_PATH = '/usr/bin/ffmpeg'  # Default path for Linux systems
-    subprocess.run([FFMPEG_PATH, '-version'], capture_output=True,
-                   check=True)  # Verify FFmpeg is available
+    subprocess.run([FFMPEG_PATH, '-version'], capture_output=True, check=True)  # Verify FFmpeg is available
 except (subprocess.CalledProcessError, FileNotFoundError):
     try:
         FFMPEG_PATH = subprocess.check_output(
@@ -54,7 +53,7 @@ def detect_scene_chunks(video_path):
         framerate = video.frame_rate
         logger.info(f"Framerate: {framerate}")
 
-        # Detect scenes with built-in progress bar
+        # Detect scenes with built-in progress bar, main detection code block
         scenes = detect(video_path, AdaptiveDetector(
             adaptive_threshold=CONFIG['ADAPTIVE_THRESHOLD'],
             min_scene_len=CONFIG['MIN_SCENE_LEN'],
@@ -168,6 +167,52 @@ def export_single_chunk(args):
         return output_path, False
 
 
+def retry_failed_exports(video_path, output_dir, failed_exports, scenes, framerate, max_retries=3):
+    """New function to handle retrying failed exports"""
+    logger.info(f"Attempting to retry {len(failed_exports)} failed exports...")
+
+    for retry in range(max_retries):
+        if not failed_exports:
+            break
+
+        logger.info(f"Retry attempt {retry + 1}/{max_retries}")
+        retry_tasks = [(video_path, failed_path,
+                       next(scene[0].get_frames() / framerate
+                            for i, scene in enumerate(scenes, 1)
+                            if os.path.join(output_dir, CONFIG['VIDEO_TEMPLATE'].format(i)) == failed_path),
+                       next(scene[1].get_frames() / framerate - scene[0].get_frames() / framerate
+                            for i, scene in enumerate(scenes, 1)
+                            if os.path.join(output_dir, CONFIG['VIDEO_TEMPLATE'].format(i)) == failed_path))
+                       for failed_path in failed_exports]
+
+        still_failed = []
+        with tqdm(total=len(retry_tasks), desc=f"Retry attempt {retry + 1}", unit="cut") as pbar:
+            with ThreadPoolExecutor(max_workers=CONFIG['THREADS']) as executor:
+                futures = [executor.submit(export_single_chunk, task)
+                           for task in retry_tasks]
+
+                for future in futures:
+                    try:
+                        output_path, success = future.result()
+                        if not success:
+                            still_failed.append(output_path)
+                        pbar.update(1)
+                    except Exception as e:
+                        logger.error(f"Retry task failed: {str(e)}")
+                        still_failed.append(output_path)
+                        pbar.update(1)
+
+        failed_exports = still_failed
+        if failed_exports:
+            logger.warning(
+                f"Still failed after attempt {retry + 1}: {len(failed_exports)} cuts")
+        else:
+            logger.info("All retried exports completed successfully!")
+            break
+
+    return failed_exports
+
+
 def export_scene_chunks(video_path, output_dir):
     try:
         scenes, framerate = detect_scene_chunks(video_path)
@@ -227,7 +272,7 @@ def export_scene_chunks(video_path, output_dir):
             return
 
         # Process all tasks in parallel
-        failed_exports = []
+        failed_exports = [] # Initialize empty list for failed exports
         max_workers = CONFIG['THREADS']
         logger.info(
             f"Processing {len(export_tasks)} cuts using {max_workers} workers")
@@ -240,20 +285,28 @@ def export_scene_chunks(video_path, output_dir):
                 for future in futures:
                     try:
                         output_path, success = future.result()
-                        if not success:
-                            failed_exports.append(output_path)
+                        if not success:  # if export_single_chunk returns (path, False)
+                            failed_exports.append(output_path)  # add path to failed_exports list
                         pbar.update(1)
                     except Exception as e:
                         logger.error(f"Export task failed: {str(e)}")
-                        failed_exports.append(output_path)
+                        failed_exports.append(output_path) # Also add to list if exception occurs
                         pbar.update(1)
 
+        # After the first complete run, handle any failures
         if failed_exports:
-            logger.warning(f"Failed to export {len(failed_exports)} cuts")
-            for path in failed_exports:
-                logger.warning(f"Failed export: {path}")
+            failed_exports = retry_failed_exports(
+                video_path, output_dir, failed_exports, scenes, framerate)
+
+            if failed_exports:
+                logger.warning(
+                    f"Failed to export {len(failed_exports)} cuts after all retry attempts")
+                for path in failed_exports:
+                    logger.warning(f"Failed export: {path}")
+            else:
+                logger.info("All cuts exported successfully after retries")
         else:
-            logger.info("All cuts exported successfully")
+            logger.info("All cuts exported successfully on first attempt")
 
     except KeyboardInterrupt:
         logger.info("Export process interrupted by user")
