@@ -6,8 +6,7 @@ import logging
 import subprocess
 
 # Configure logging
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
 
 
@@ -69,9 +68,8 @@ def process_video_opencv(video_path, target_size, output_path):
 def process_video_ffmpeg(video_path, target_size, output_path):
     try:
         # Specify the full path to system FFmpeg
-        FFMPEG_PATH = '/usr/bin/ffmpeg' # run which ffmpeg to find the path
-        subprocess.run([FFMPEG_PATH, '-version'],
-                       capture_output=True, check=True)
+        FFMPEG_PATH = '/usr/bin/ffmpeg'  # run which ffmpeg to find the path
+        subprocess.run([FFMPEG_PATH, '-version'], capture_output=True, check=True)
     except (subprocess.CalledProcessError, FileNotFoundError):
         logger.error("FFmpeg is not installed or not in PATH")
         raise RuntimeError("FFmpeg is required but not found")
@@ -123,6 +121,18 @@ def process_video(video_path, target_size, output_dir, keep_audio=False):
         process_video_opencv(video_path, target_size, output_path)
 
 
+def get_video_dimensions(video_path):
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        logger.error(f"Error: Could not open video file {video_path}")
+        return None, None
+
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    return width, height
+
+
 def main():
     questions = [
         inquirer.Path('video_path',
@@ -148,7 +158,8 @@ def main():
     keep_audio = answers['audio'] == 'keep audio'
 
     # Remove whitespace and quotes if present
-    video_path = video_path.strip().replace('"', '').replace("'", '').replace('`', '')
+    video_path = video_path.strip().replace(
+        '"', '').replace("'", '').replace('`', '')
 
     # Create resized subfolder
     output_dir = os.path.join(video_path, "resized")
@@ -160,6 +171,20 @@ def main():
         if filename.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
             full_path = os.path.join(video_path, filename)
             logger.info(f"\nProcessing {filename}...")
+
+            # Get original dimensions
+            _, original_height = get_video_dimensions(full_path)
+            if original_height is None:
+                continue
+
+            # Validate target size
+            if target_size > original_height:
+                logger.error(f"Target height ({target_size}px) is larger than original height ({original_height}px). Skipping {filename}")
+                continue
+            elif target_size == original_height:
+                logger.info(f"Video is already at target height ({original_height}px). Skipping {filename}")
+                continue
+
             process_video(full_path, target_size, output_dir, keep_audio)
 
 

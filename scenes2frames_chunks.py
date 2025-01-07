@@ -1,5 +1,4 @@
 import cv2
-# import os
 import math
 from pathlib import Path
 import subprocess

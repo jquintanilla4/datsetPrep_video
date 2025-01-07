@@ -8,6 +8,7 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
 import sys
 import csv
+import inquirer
 
 # Configuration parameters
 CONFIG = {
@@ -17,7 +18,7 @@ CONFIG = {
 
     # Detection parameters - tuned for better accuracy/speed balance
     'ADAPTIVE_THRESHOLD': 2.0,   # Slightly more aggressive threshold
-    'MIN_SCENE_LEN': 30,        # Reduced minimum scene length
+    'MIN_SCENE_LEN': None,        # Reduced minimum scene length
     'MIN_CONTENT_VAL': 15.0,    # Increased minimum content value
     'FRAME_WINDOW': 2,          # Reduced window size for faster processing
 
@@ -31,11 +32,11 @@ logger = logging.getLogger(__name__)
 # setup ffmpeg path
 try:
     FFMPEG_PATH = '/usr/bin/ffmpeg'  # Default path for Linux systems
-    subprocess.run([FFMPEG_PATH, '-version'], capture_output=True, check=True)  # Verify FFmpeg is available
+    subprocess.run([FFMPEG_PATH, '-version'], capture_output=True,
+                   check=True)  # Verify FFmpeg is available
 except (subprocess.CalledProcessError, FileNotFoundError):
     try:
-        FFMPEG_PATH = subprocess.check_output(
-            ['which', 'ffmpeg']).decode().strip()  # Try finding ffmpeg in PATH
+        FFMPEG_PATH = subprocess.check_output(['which', 'ffmpeg']).decode().strip()  # Try finding ffmpeg in PATH
     except subprocess.CalledProcessError:
         logger.error("FFmpeg is not installed or not in PATH")
         raise RuntimeError("FFmpeg is required but not found")
@@ -69,8 +70,7 @@ def detect_scene_chunks(video_path):
         logger.info(f"Found {len(scenes)} cuts")
 
         # Save to CSV
-        csv_output_path = os.path.join(
-            os.path.dirname(video_path), 'scene_info.csv')
+        csv_output_path = os.path.join(os.path.dirname(video_path), 'scene_info.csv')
         logger.info(f"Saving scene information to: {csv_output_path}")
 
         with open(csv_output_path, 'w', newline='') as csvfile:
@@ -237,8 +237,7 @@ def export_scene_chunks(video_path, output_dir):
 
         # Verify source video is still accessible
         if not os.path.exists(video_path):
-            raise FileNotFoundError(
-                f"Source video no longer accessible: {video_path}")
+            raise FileNotFoundError(f"Source video no longer accessible: {video_path}")
 
         # Verify output directory is writable
         test_file = os.path.join(output_dir, '.write_test')
@@ -250,8 +249,7 @@ def export_scene_chunks(video_path, output_dir):
             raise IOError(f"Output directory is not writable: {output_dir}")
 
         # Check available disk space
-        free_space = os.statvfs(output_dir).f_frsize * \
-            os.statvfs(output_dir).f_bavail
+        free_space = os.statvfs(output_dir).f_frsize * os.statvfs(output_dir).f_bavail
         if free_space < 1024 * 1024 * 1024:  # Less than 1GB
             logger.warning("Low disk space warning! Less than 1GB available.")
 
@@ -272,7 +270,7 @@ def export_scene_chunks(video_path, output_dir):
             return
 
         # Process all tasks in parallel
-        failed_exports = [] # Initialize empty list for failed exports
+        failed_exports = []  # Initialize empty list for failed exports
         max_workers = CONFIG['THREADS']
         logger.info(
             f"Processing {len(export_tasks)} cuts using {max_workers} workers")
@@ -290,7 +288,7 @@ def export_scene_chunks(video_path, output_dir):
                         pbar.update(1)
                     except Exception as e:
                         logger.error(f"Export task failed: {str(e)}")
-                        failed_exports.append(output_path) # Also add to list if exception occurs
+                        failed_exports.append(output_path)  # Also add to list if exception occurs
                         pbar.update(1)
 
         # After the first complete run, handle any failures
@@ -318,26 +316,41 @@ def export_scene_chunks(video_path, output_dir):
 
 def main():
     try:
-        # Get video path from user and validate
-        while True:
-            video_path = input("Enter the video file path: ").strip()
-            # Remove quotes if present
-            video_path = video_path.replace(
-                '"', '').replace("'", '').replace('`', '')
+        # Prepare questions for user
+        questions = [
+            inquirer.Path('video_path',
+                          message="Enter the path to your video file",
+                          path_type=inquirer.Path.FILE,
+                          exists=True),
+            inquirer.List('min_scene_len',
+                          message="Select minimum scene length (in frames)",
+                          choices=[
+                              ('30 frames (more sensitive)', 30),
+                              ('40 frames', 40),
+                              ('50 frames', 50),
+                              ('60 frames (less sensitive)', 60)
+                          ],
+                          default=30)
+        ]
 
-            if os.path.exists(video_path) and video_path.lower().endswith(('.mp4', '.avi', '.mkv')):
-                break
-            else:
-                logger.error(
-                    "Invalid video path or unsupported format. Please try again.")
+        answers = inquirer.prompt(questions)  # initialize the questions
+
+        if not answers:  # User pressed Ctrl+C
+            logger.info("Process cancelled by user")
+            sys.exit(0)
+
+        # Add answers to variables
+        video_path = answers['video_path']
+        video_path = video_path.strip().replace('"', '').replace("'", '').replace('`', '')
+        CONFIG['MIN_SCENE_LEN'] = answers['min_scene_len']
+
+        logger.info(f"Selected video: {video_path}")
+        logger.info(f"Using minimum scene length: {CONFIG['MIN_SCENE_LEN']} frames")
 
         # Setup output directory
         video_dir = os.path.dirname(video_path)
         output_dir = os.path.join(video_dir, 'scene_chunks')
         os.makedirs(output_dir, exist_ok=True)
-        # upadate logger
-        logger.info(f"Input video: {video_path}")
-        logger.info(f"Output directory: {output_dir}")
 
         # export scenes chunks
         export_scene_chunks(video_path, output_dir)
