@@ -56,22 +56,20 @@ def process_video(input_path, output_dir, max_frames):
     logger.info(f"Will be split into {num_chunks} chunks")
 
     # Create progress bar for chunks
-    chunk_pbar = tqdm(range(num_chunks),
-                      desc="Processing chunks", unit="chunk")
+    chunk_pbar = tqdm(range(num_chunks), desc="Processing chunks", unit="chunk")
 
     for chunk_idx in chunk_pbar:
-        # Create output filename for this chunk
-        output_filename = f"{input_path.stem}_chunk{chunk_idx + 1}{input_path.suffix}"
-        output_path = output_dir / output_filename
-
-        # Create video writer for this chunk
-        writer = create_video_writer(
-            video, output_path, frame_width, frame_height)
-
         # Calculate frames for this chunk
         start_frame = chunk_idx * max_frames
         end_frame = min((chunk_idx + 1) * max_frames, total_frames)
         frames_in_chunk = end_frame - start_frame
+
+        # Create output filename for this chunk with frame count
+        output_filename = f"{input_path.stem}_chunk{chunk_idx + 1}_{frames_in_chunk}frames{input_path.suffix}"
+        output_path = output_dir / output_filename
+
+        # Create video writer for this chunk
+        writer = create_video_writer(video, output_path, frame_width, frame_height)
 
         chunk_pbar.set_postfix({"frames": f"{start_frame + 1}-{end_frame}"})
 
