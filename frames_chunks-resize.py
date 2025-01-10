@@ -141,10 +141,10 @@ def main():
                       exists=True),
         inquirer.List('height',
                       message="Select target height",
-                      choices=['1024', '768', '512'],
+                      choices=['1024', '960', '768', '512', '480', '360', '256', '128'],
                       carousel=True),
         inquirer.List('audio',
-                      message="Select audio",
+                      message="Select audio preference",
                       choices=['keep audio', 'no audio'],
                       carousel=True)
     ]
@@ -162,7 +162,7 @@ def main():
         '"', '').replace("'", '').replace('`', '')
 
     # Create resized subfolder
-    output_dir = os.path.join(video_path, "resized")
+    output_dir = os.path.join(video_path, "chunks_resized")
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 

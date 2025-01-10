@@ -7,6 +7,8 @@ import os.path
 from google.api_core.exceptions import ResourceExhausted, DeadlineExceeded
 from tqdm import tqdm
 import logging
+import pandas as pd
+import sys
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
@@ -33,16 +35,14 @@ Second, based on your internal description, provide ONLY a comprehensive caption
 - Character features and expressions (facial features, emotions, distinctive traits)
 - Positioning and actions (pose, gestures, movement)
 - Environmental details (surroundings, objects, terrain)
-- Color information (specific colors of elements)
 - Spatial relationships (composition, placement of elements)
 - Scene composition (framing, depth, perspective)
 - Time of day lighting conditions (natural or artificial light sources)
-- Shadow details (cast shadows, ambient occlusion)
-- Weather implications (environmental conditions)
+- Weather or environmental conditions
 
 Important: Do not include your internal description in the output - only provide the final descriptive caption.
 
-The final caption should only be one paragraph."""
+The final caption must only be one paragraph."""
 
 # Define the system instruction (including the one-shot example)
 system_instruction = """
@@ -72,8 +72,16 @@ model = genai.GenerativeModel(
 )
 
 
-def process_single_video(video_path, model, prompt):
-    """Process a single video and generate analysis."""
+def process_single_video(video_path, model, prompt, results_df):
+    """
+    Process a single video and generate analysis.
+
+    Args:
+        video_path: Path to the video file
+        model: The Gemini model instance
+        prompt: The prompt to use for generation
+        results_df: DataFrame to store results
+    """
     try:
         logger.info(f"Uploading video: {video_path}")
         video_file = genai.upload_file(path=video_path)
@@ -81,7 +89,8 @@ def process_single_video(video_path, model, prompt):
 
         # Wait for video processing to complete
         while video_file.state.name == "PROCESSING":
-            logger.info('.', end='')
+            sys.stdout.write('.')
+            sys.stdout.flush()
             time.sleep(10)
             video_file = genai.get_file(video_file.name)
 
@@ -90,43 +99,65 @@ def process_single_video(video_path, model, prompt):
 
         messages = [video_file, prompt]
         response = generate_with_retry(model, messages)
+        description = response.text.strip()
 
+        # Save to individual text file
         filename = os.path.basename(video_path)
         base_name = os.path.splitext(filename)[0]
         output_filename = f"{base_name}.txt"
         output_path = os.path.join(os.path.dirname(video_path), output_filename)
 
         with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(response.text.strip())
+            f.write(description)
+
+        # Add to DataFrame
+        results_df.loc[len(results_df)] = {
+            'video_name': filename,
+            'description': description
+        }
+
+        # Save DataFrame after each successful processing
+        csv_path = os.path.join(os.path.dirname(video_path), 'video_descriptions.csv')
+        results_df.to_csv(csv_path, index=False)
 
         return True
 
     except Exception as e:
         logger.error(f"Error processing {video_path}: {e}")
+        # Still add to DataFrame but with error message
+        results_df.loc[len(results_df)] = {
+            'video_name': os.path.basename(video_path),
+            'description': f"ERROR: {str(e)}"
+        }
         return False
+
 
 def process_folder(folder_path, model, prompt):
     """Process all videos in a folder one at a time."""
+    # Initialize or load existing results DataFrame
+    csv_path = os.path.join(folder_path, 'video_descriptions.csv')
+    if os.path.exists(csv_path):
+        results_df = pd.read_csv(csv_path)
+        logger.info(f"Loaded existing results from {csv_path}")
+    else:
+        results_df = pd.DataFrame(columns=['video_name', 'description'])
+
     video_files = [
         filename for filename in os.listdir(folder_path)
         if filename.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm'))  # Updated for video extensions
     ]
 
-    with tqdm(total=len(video_files), desc="Processing videos") as pbar: # Progress bar for video folder processing
+    with tqdm(total=len(video_files), desc="Processing videos") as pbar:  # Progress bar for video folder processing
         for filename in video_files:
-            video_path = os.path.join(folder_path, filename)
-            
-            base_name = os.path.splitext(filename)[0]
-            processed_path = os.path.join(folder_path, f"{base_name}.txt")
-            
-            if os.path.exists(processed_path) and os.path.getsize(processed_path) > 0:
-                logger.info(f"Skipping {filename}: Processed file already exists")
+            # Skip if already in DataFrame
+            if filename in results_df['video_name'].values:
+                logger.info(f"Skipping {filename}: Already processed")
                 pbar.update(1)
                 continue
 
-            process_single_video(video_path, model, prompt)
+            video_path = os.path.join(folder_path, filename)
+            process_single_video(video_path, model, prompt, results_df)
             logger.info(f"Processed {filename}")
-            
             pbar.update(1)
 
 
@@ -150,8 +181,8 @@ def generate_with_retry(model, messages, max_retries=5):
     while retry_count < max_retries:  # Loop until max retries reached
         try:
             start_time = time.time()  # Record start time for API call
-            
-            response = model.generate_content( # Generate content using the provided model and messages
+
+            response = model.generate_content(  # Generate content using the provided model and messages
                 messages,
                 request_options=request_options  # Options for the request
             )
@@ -171,7 +202,7 @@ def generate_with_retry(model, messages, max_retries=5):
             delay = base_delay * (delay_multiplier ** retry_count) + \
                 random.uniform(0, base_delay * retry_count)  # Calculate delay
             logger.info(f"Retrying in {delay:.2f} seconds...")
-            time.sleep(delay)  # Wait for the calculated delay before retrying
+            time.sleep(delay)
 
 
 def main():
