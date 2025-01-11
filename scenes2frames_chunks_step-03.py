@@ -189,7 +189,7 @@ def main():
     logger.info("All videos have been processed successfully!")
 
     # Ask user if they want to convert to H.264
-    if input("\nWould you like to convert the videos to H.264 codec? (y/n): ").lower() == 'y':
+    if input("\nWould you like to convert the videos to H.264 codec? Chunking converts videos to mp4v, so this is recommended (y/n): ").lower() == 'y':
         convert_to_h264(output_dir)
 
 
