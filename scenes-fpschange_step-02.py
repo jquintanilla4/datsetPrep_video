@@ -30,14 +30,12 @@ def get_video_fps(video_path):
             '-i', str(video_path)
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
-        # FFmpeg outputs to stderr for this command
         output = result.stderr
 
         # Look for the fps information in the output
         for line in output.split('\n'):
             if 'fps' in line:
-                # Extract fps value using string manipulation
-                fps_str = line.split(',')[5].strip().split()[0]
+                fps_str = line.split(',')[5].strip().split()[0] # Extract fps value using string manipulation
                 return float(fps_str)
         return None
     except Exception as e:
@@ -75,9 +73,8 @@ def change_video_fps(video_path, target_fps, convert_h264=False):
         raise RuntimeError("FFmpeg is required but not found")
 
     input_path = Path(video_path)
-    # Create fps_change directory if it doesn't exist
     output_dir = input_path.parent / 'fps_change'
-    output_dir.mkdir(exist_ok=True)
+    output_dir.mkdir(exist_ok=True) # Create fps_change directory if it doesn't exist
 
     output_path = output_dir / f"{input_path.stem}_{target_fps}fps{OUTPUT_VIDEO_EXTENSION}"
 

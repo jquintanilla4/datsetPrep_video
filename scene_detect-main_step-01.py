@@ -7,7 +7,7 @@ import logging
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
 import sys
-import csv
+import pandas as pd
 import inquirer
 
 # Configuration parameters
@@ -69,27 +69,22 @@ def detect_scene_chunks(video_path):
 
         logger.info(f"Found {len(scenes)} cuts")
 
-        # Save to CSV
+        # Save to CSV using pandas
         csv_output_path = os.path.join(os.path.dirname(video_path), 'scene_info.csv')
         logger.info(f"Saving scene information to: {csv_output_path}")
 
-        with open(csv_output_path, 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow(['Cut Name', 'Start Frame',
-                            'End Frame', 'Length (frames)'])
+        # Create DataFrame with scene information
+        scene_data = [
+            {
+                'Cut Name': f'cut_{i+1:03d}',
+                'Start Frame': scene[0].get_frames(),
+                'End Frame': scene[1].get_frames(),
+                'Length (frames)': scene[1].get_frames() - scene[0].get_frames()
+            }
+            for i, scene in enumerate(scenes)
+        ]
 
-            for i, scene in enumerate(scenes):
-                start_frame = scene[0].get_frames()
-                end_frame = scene[1].get_frames()
-                length_frames = end_frame - start_frame
-
-                # Write to CSV
-                writer.writerow([
-                    f'cut_{i+1:03d}',
-                    start_frame,
-                    end_frame,
-                    length_frames
-                ])
+        pd.DataFrame(scene_data).to_csv(csv_output_path, index=False)
 
         return scenes, framerate
 
@@ -328,7 +323,8 @@ def main():
                               ('30 frames (more sensitive)', 30),
                               ('40 frames', 40),
                               ('50 frames', 50),
-                              ('60 frames (less sensitive)', 60)
+                              ('60 frames', 60),
+                              ('70 frames (less sensitive)', 70)
                           ],
                           default=30)
         ]
