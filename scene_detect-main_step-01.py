@@ -11,18 +11,53 @@ import pandas as pd
 import inquirer
 
 # Configuration parameters
-CONFIG = {
-    # Video processing - optimized for speed and quality (reference hardware is 4090)
-    'DOWNSCALE_FACTOR': 1,      # 1 for full resolution, 2 for half, 4 for quarter
-    'THREADS': 32,              # Increased for better CPU utilization
-
-    # Detection parameters - tuned for better accuracy/speed balance
-    'ADAPTIVE_THRESHOLD': 2.0,   # Slightly more aggressive threshold
-    'MIN_SCENE_LEN': None,        # Reduced minimum scene length
-    'MIN_CONTENT_VAL': 15.0,    # Increased minimum content value
-    'FRAME_WINDOW': 2,          # Reduced window size for faster processing
-
-    'VIDEO_TEMPLATE': 'cut_{:03d}.mp4',  # Template for output video filenames
+FFMPEG_CONFIGS = {
+    'nvidia_4090': {
+        'DOWNSCALE_FACTOR': 1,
+        'THREADS': 32,
+        'ADAPTIVE_THRESHOLD': 2.0,
+        'MIN_SCENE_LEN': None,  # User will specify the minimum scene length
+        'MIN_CONTENT_VAL': 15.0,
+        'FRAME_WINDOW': 2,
+        'VIDEO_TEMPLATE': 'cut_{:03d}.mp4',
+        'FFMPEG_INPUT_PARAMS': [  # Parameters that must come before input
+            '-hwaccel', 'cuda',
+            '-hwaccel_device', '0',
+            '-extra_hw_frames', '8'
+        ],
+        'FFMPEG_OUTPUT_PARAMS': [  # Parameters for output/encoding
+            '-c:v', 'h264_nvenc',
+            '-preset', 'p1',
+            '-tune', 'hq',
+            '-rc', 'vbr_hq',
+            '-cq', '20',
+            '-b:v', '20M',
+            '-maxrate', '30M',
+            '-bufsize', '30M',
+            '-profile:v', 'high',
+            '-spatial-aq', '1',
+            '-temporal-aq', '1',
+            '-aq-strength', '8',
+            '-surfaces', '32',
+            '-multipass', 'fullres',
+            '-gpu', '0'
+        ]
+    },
+    'cpu': {
+        'DOWNSCALE_FACTOR': 2,
+        'THREADS': 8,
+        'ADAPTIVE_THRESHOLD': 2.0,
+        'MIN_SCENE_LEN': None,
+        'MIN_CONTENT_VAL': 15.0,
+        'FRAME_WINDOW': 2,
+        'VIDEO_TEMPLATE': 'cut_{:03d}.mp4',
+        'FFMPEG_INPUT_PARAMS': [],  # No special input parameters for CPU
+        'FFMPEG_OUTPUT_PARAMS': [
+            '-c:v', 'libx264',
+            '-crf', '19',
+            '-c:a', 'copy'
+        ]
+    }
 }
 
 # setup logger
@@ -42,9 +77,14 @@ except (subprocess.CalledProcessError, FileNotFoundError):
         raise RuntimeError("FFmpeg is required but not found")
 
 
-def detect_scene_chunks(video_path):
+def detect_scene_chunks(video_path, config):
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file not found: {video_path}")
+
+    # Add file size check
+    file_size = os.path.getsize(video_path)
+    if file_size > 4 * 1024 * 1024 * 1024:  # 4GB
+        logger.warning("Large video file detected. This might require significant memory.")
 
     logger.info(f"Starting cut detection on: {video_path}")
 
@@ -56,10 +96,10 @@ def detect_scene_chunks(video_path):
 
         # Detect scenes with built-in progress bar, main detection code block
         scenes = detect(video_path, AdaptiveDetector(
-            adaptive_threshold=CONFIG['ADAPTIVE_THRESHOLD'],
-            min_scene_len=CONFIG['MIN_SCENE_LEN'],
-            min_content_val=CONFIG['MIN_CONTENT_VAL'],
-            window_width=CONFIG['FRAME_WINDOW'],
+            adaptive_threshold=config['ADAPTIVE_THRESHOLD'],
+            min_scene_len=config['MIN_SCENE_LEN'],
+            min_content_val=config['MIN_CONTENT_VAL'],
+            window_width=config['FRAME_WINDOW'],
             luma_only=False
         ), show_progress=True)
 
@@ -94,42 +134,74 @@ def detect_scene_chunks(video_path):
 
 
 def export_single_chunk(args):
-    """Helper function for parallel processing"""
-    video_path, output_path, start_time, duration = args
+    """Export a single video chunk using FFmpeg.
+
+    Args:
+        args (tuple): A tuple containing:
+            - video_path (str): Path to the source video file
+            - output_path (str): Path where the exported chunk should be saved
+            - start_time (float): Start time in seconds for the chunk
+            - duration (floa t): Duration in seconds for the chunk
+            - config (dict): FFMPEG configuration dictionary
+
+    Returns:
+        tuple: A tuple containing (output_path, success_status)
+    """
+    video_path, output_path, start_time, duration, config = args
 
     start_timecode = str(datetime.timedelta(seconds=start_time))
     duration_timecode = str(datetime.timedelta(seconds=duration))
 
-    # FFmpeg command with optimized NVENC settings for 4090
+    # Check if video has audio stream with more detailed probe
+    probe_cmd = [
+        'ffprobe',  # Use ffprobe directly for stream detection
+        '-v', 'error',
+        '-select_streams', 'a',
+        '-show_entries', 'stream=codec_type',
+        '-of', 'default=nw=1:nk=1',
+        video_path
+    ]
+
+    try:
+        has_audio = 'audio' in subprocess.check_output(probe_cmd, text=True).strip()
+        logger.info(f"Audio stream detection: {'Found' if has_audio else 'Not found'}")
+    except subprocess.CalledProcessError:
+        logger.warning(f"Failed to detect audio streams, assuming no audio")
+        has_audio = False
+
+    # Base command
     cmd = [
         FFMPEG_PATH,
         '-y',
-        '-loglevel', 'warning',
-        '-hwaccel', 'cuda',
-        '-hwaccel_device', '0',
-        '-extra_hw_frames', '8',  # Additional hardware frame buffers
+        '-loglevel', 'warning'
+    ]
+
+    # Add input parameters from config
+    cmd.extend(config['FFMPEG_INPUT_PARAMS'])
+
+    # Add input file and timing parameters
+    cmd.extend([
         '-i', video_path,
         '-ss', start_timecode,
         '-t', duration_timecode,
-        '-c:v', 'h264_nvenc',
-        '-preset', 'p1',          # Fastest preset for 4090
-        '-tune', 'hq',
-        '-rc', 'vbr_hq',         # High quality VBR mode
-        '-cq', '20',             # Balanced quality setting
-        '-b:v', '20M',           # Increased bitrate
-        '-maxrate', '30M',
-        '-bufsize', '30M',
-        '-profile:v', 'high',
-        '-spatial-aq', '1',
-        '-temporal-aq', '1',
-        '-aq-strength', '8',     # Increased AQ strength
-        '-surfaces', '32',
-        '-multipass', 'fullres',  # Full resolution multipass
-        '-gpu', '0',
-        '-c:a', 'copy',
-        '-avoid_negative_ts', '1',
-        output_path
-    ]
+        '-map', '0:v:0'  # Always map video stream
+    ])
+
+    # Add output parameters from config
+    cmd.extend(config['FFMPEG_OUTPUT_PARAMS'])
+
+    # Add audio mapping and parameters if present
+    if has_audio:
+        cmd.extend([
+            '-map', '0:a:0?',  # Map audio stream if present, ? makes it optional
+            '-c:a', 'aac',     # Use AAC codec for audio
+            '-b:a', '192k'     # Set audio bitrate
+        ])
+    else:
+        cmd.extend(['-an'])    # No audio
+
+    # Add final output path
+    cmd.append(output_path)
 
     try:
         # First verify the output directory exists
@@ -145,25 +217,32 @@ def export_single_chunk(args):
             check=True
         )
 
-        # Verify the output file exists and has size
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-            return output_path, True
-        else:
-            logger.error(f"Output file is empty or missing: {output_path}")
-            return output_path, False
+        if result.stderr:
+            logger.debug(f"FFmpeg stderr output: {result.stderr}")
+
+        return output_path, True
 
     except subprocess.CalledProcessError as e:
         logger.error(f"FFmpeg error for {output_path}:")
         logger.error(f"Error output: {e.stderr}")
         return output_path, False
     except Exception as e:
-        logger.error(
-            f"Unexpected error while processing {output_path}: {str(e)}")
+        logger.error(f"Unexpected error while processing {output_path}: {str(e)}")
         return output_path, False
 
 
-def retry_failed_exports(video_path, output_dir, failed_exports, scenes, framerate, max_retries=3):
-    """New function to handle retrying failed exports"""
+def retry_failed_exports(video_path, output_dir, failed_exports, scenes, framerate, config, max_retries=3):
+    """Retry failed exports with improved error handling and scene matching logic.
+
+    Args:
+        video_path (str): Path to the source video
+        output_dir (str): Directory for output files
+        failed_exports (list): List of failed export paths
+        scenes (list): List of detected scenes
+        framerate (float): Video framerate
+        config (dict): FFMPEG configuration
+        max_retries (int, optional): Maximum retry attempts. Defaults to 3.
+    """
     logger.info(f"Attempting to retry {len(failed_exports)} failed exports...")
 
     for retry in range(max_retries):
@@ -171,46 +250,84 @@ def retry_failed_exports(video_path, output_dir, failed_exports, scenes, framera
             break
 
         logger.info(f"Retry attempt {retry + 1}/{max_retries}")
-        retry_tasks = [(video_path, failed_path,
-                       next(scene[0].get_frames() / framerate
-                            for i, scene in enumerate(scenes, 1)
-                            if os.path.join(output_dir, CONFIG['VIDEO_TEMPLATE'].format(i)) == failed_path),
-                       next(scene[1].get_frames() / framerate - scene[0].get_frames() / framerate
-                            for i, scene in enumerate(scenes, 1)
-                            if os.path.join(output_dir, CONFIG['VIDEO_TEMPLATE'].format(i)) == failed_path))
-                       for failed_path in failed_exports]
+        retry_tasks = []
 
+        # Process each failed export
+        for failed_path in failed_exports:
+            try:
+                # Extract the scene number from the failed path
+                scene_num = int(os.path.basename(failed_path).split('_')[1].split('.')[0])
+
+                # Validate scene number is within range
+                if scene_num < 1 or scene_num > len(scenes):
+                    logger.error(f"Invalid scene number {scene_num} for {failed_path}")
+                    continue
+
+                # Reconstruct the output path using output_dir and scene number
+                output_path = os.path.join(output_dir, config['VIDEO_TEMPLATE'].format(scene_num))
+
+                # Get scene timestamps (0-based index, so subtract 1 from scene_num)
+                scene = scenes[scene_num - 1]
+                start_time = scene[0].get_frames() / framerate
+                duration = (scene[1].get_frames() - scene[0].get_frames()) / framerate
+
+                # Validate timestamps
+                if start_time < 0 or duration <= 0:
+                    logger.error(f"Invalid timestamps for {failed_path}: start={start_time}, duration={duration}")
+                    continue
+
+                retry_tasks.append((
+                    video_path,
+                    output_path,  # Use the reconstructed output path
+                    start_time,
+                    duration,
+                    config
+                ))
+
+            except (ValueError, IndexError) as e:
+                logger.error(f"Failed to process {failed_path}: {str(e)}")
+                continue
+
+        if not retry_tasks:
+            logger.error("No valid tasks to retry")
+            return failed_exports
+
+        # Process retry tasks
         still_failed = []
         with tqdm(total=len(retry_tasks), desc=f"Retry attempt {retry + 1}", unit="cut") as pbar:
-            with ThreadPoolExecutor(max_workers=CONFIG['THREADS']) as executor:
-                futures = [executor.submit(export_single_chunk, task)
-                           for task in retry_tasks]
+            with ThreadPoolExecutor(max_workers=config['THREADS']) as executor:
+                futures = [executor.submit(export_single_chunk, task) for task in retry_tasks]
 
-                for future in futures:
+                for future, task in zip(futures, retry_tasks):
                     try:
                         output_path, success = future.result()
                         if not success:
                             still_failed.append(output_path)
-                        pbar.update(1)
+                            logger.warning(f"Retry failed for {output_path}")
                     except Exception as e:
-                        logger.error(f"Retry task failed: {str(e)}")
-                        still_failed.append(output_path)
+                        logger.error(f"Retry task failed for {task[1]}: {str(e)}")
+                        still_failed.append(task[1])
+                    finally:
                         pbar.update(1)
 
         failed_exports = still_failed
         if failed_exports:
-            logger.warning(
-                f"Still failed after attempt {retry + 1}: {len(failed_exports)} cuts")
+            logger.warning(f"Still failed after attempt {retry + 1}: {len(failed_exports)} cuts")
         else:
             logger.info("All retried exports completed successfully!")
             break
 
+    if failed_exports:
+        logger.error("Some exports could not be completed after all retries:")
+        for failed in failed_exports:
+            logger.error(f"  - {failed}")
+
     return failed_exports
 
 
-def export_scene_chunks(video_path, output_dir):
+def export_scene_chunks(video_path, output_dir, config):
     try:
-        scenes, framerate = detect_scene_chunks(video_path)
+        scenes, framerate = detect_scene_chunks(video_path, config)
 
         if not scenes:
             logger.warning("No cuts detected!")
@@ -253,11 +370,11 @@ def export_scene_chunks(video_path, output_dir):
             end_time = scene[1].get_frames() / framerate
             duration = end_time - start_time
             output_path = os.path.join(
-                output_dir, CONFIG['VIDEO_TEMPLATE'].format(i))
+                output_dir, config['VIDEO_TEMPLATE'].format(i))
 
             if not os.path.exists(output_path):
                 export_tasks.append(
-                    (video_path, output_path, start_time, duration)
+                    (video_path, output_path, start_time, duration, config)
                 )
 
         if not export_tasks:
@@ -266,7 +383,7 @@ def export_scene_chunks(video_path, output_dir):
 
         # Process all tasks in parallel
         failed_exports = []  # Initialize empty list for failed exports
-        max_workers = CONFIG['THREADS']
+        max_workers = config['THREADS']
         logger.info(
             f"Processing {len(export_tasks)} cuts using {max_workers} workers")
 
@@ -289,7 +406,7 @@ def export_scene_chunks(video_path, output_dir):
         # After the first complete run, handle any failures
         if failed_exports:
             failed_exports = retry_failed_exports(
-                video_path, output_dir, failed_exports, scenes, framerate)
+                video_path, output_dir, failed_exports, scenes, framerate, config)
 
             if failed_exports:
                 logger.warning(
@@ -317,6 +434,12 @@ def main():
                           message="Enter the path to your video file",
                           path_type=inquirer.Path.FILE,
                           exists=True),
+            inquirer.List('processing_mode',
+                          message="Select processing mode",
+                          choices=[
+                              ('CUDA Nvidia 4090', 'nvidia_4090'),
+                              ('CPU Only (Mac/Other)', 'cpu'),
+                          ]),
             inquirer.List('min_scene_len',
                           message="Select minimum scene length (in frames)",
                           choices=[
@@ -329,18 +452,19 @@ def main():
                           default=30)
         ]
 
-        answers = inquirer.prompt(questions)  # initialize the questions
+        answers = inquirer.prompt(questions)
 
-        if not answers:  # User pressed Ctrl+C
+        if not answers:
             logger.info("Process cancelled by user")
             sys.exit(0)
 
         # Add answers to variables
-        video_path = answers['video_path']
-        video_path = video_path.strip().replace('"', '').replace("'", '').replace('`', '')
+        video_path = answers['video_path'].strip().replace('"', '').replace("'", '').replace('`', '')
+        CONFIG = FFMPEG_CONFIGS[answers['processing_mode']]
         CONFIG['MIN_SCENE_LEN'] = answers['min_scene_len']
 
         logger.info(f"Selected video: {video_path}")
+        logger.info(f"Processing mode: {answers['processing_mode']}")
         logger.info(f"Using minimum scene length: {CONFIG['MIN_SCENE_LEN']} frames")
 
         # Setup output directory
@@ -349,7 +473,7 @@ def main():
         os.makedirs(output_dir, exist_ok=True)
 
         # export scenes chunks
-        export_scene_chunks(video_path, output_dir)
+        export_scene_chunks(video_path, output_dir, CONFIG)
         logger.info("Processing complete!")
 
     except KeyboardInterrupt:
