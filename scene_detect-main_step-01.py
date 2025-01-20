@@ -60,24 +60,63 @@ FFMPEG_CONFIGS = {
     }
 }
 
+
 # setup logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
 
-# setup ffmpeg path
-try:
-    FFMPEG_PATH = '/usr/bin/ffmpeg'  # Default path for Linux systems
-    subprocess.run([FFMPEG_PATH, '-version'], capture_output=True,
-                   check=True)  # Verify FFmpeg is available
-except (subprocess.CalledProcessError, FileNotFoundError):
-    try:
-        FFMPEG_PATH = subprocess.check_output(['which', 'ffmpeg']).decode().strip()  # Try finding ffmpeg in PATH
-    except subprocess.CalledProcessError:
-        logger.error("FFmpeg is not installed or not in PATH")
-        raise RuntimeError("FFmpeg is required but not found")
+
+def get_ffmpeg_path():
+    """Get the FFmpeg executable path across different platforms.
+
+    Returns:
+        str: Path to FFmpeg executable
+
+    Raises:
+        RuntimeError: If FFmpeg is not found
+    """
+    if sys.platform == "win32":
+        # Check common Windows locations
+        possible_paths = [
+            os.path.join(os.environ.get('PROGRAMFILES', ''), 'ffmpeg', 'bin', 'ffmpeg.exe'),
+            os.path.join(os.environ.get('PROGRAMFILES(X86)', ''), 'ffmpeg', 'bin', 'ffmpeg.exe'),
+            'ffmpeg.exe'  # Check if it's in PATH
+        ]
+    else:
+        # Unix-like systems (Linux/Mac)
+        possible_paths = [
+            '/usr/bin/ffmpeg',
+            '/usr/local/bin/ffmpeg',
+            '/opt/homebrew/bin/ffmpeg',  # Common Homebrew path on M1 Macs
+            'ffmpeg'  # Check if it's in PATH
+        ]
+
+    # Try each possible path
+    for path in possible_paths:
+        try:
+            subprocess.run([path, '-version'], capture_output=True, check=True)
+            return path
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            continue
+
+    logger.error("FFmpeg is not installed or not in PATH")
+    raise RuntimeError("FFmpeg is required but not found. Please install FFmpeg: https://ffmpeg.org/download.html")
 
 
-def detect_scene_chunks(video_path, config):
+# Replace the existing FFmpeg path setup with this line
+FFMPEG_PATH = get_ffmpeg_path()
+
+
+def detect_scene_chunks(video_path: str, config: dict) -> tuple:
+    """Detect scenes in a video file and return the scenes along with the framerate.
+
+    Args:
+        video_path (str): Path to the video file.
+        config (dict): Configuration dictionary containing parameters for scene detection.
+
+    Returns:
+        tuple: A tuple containing a list of detected scenes and the video framerate.
+    """
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file not found: {video_path}")
 
@@ -210,6 +249,7 @@ def export_single_chunk(args):
         logger.info(f"Exporting chunk to: {output_path}")
         logger.debug(f"Running FFmpeg command: {' '.join(cmd)}")
 
+        # Run FFmpeg command
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -325,7 +365,17 @@ def retry_failed_exports(video_path, output_dir, failed_exports, scenes, framera
     return failed_exports
 
 
-def export_scene_chunks(video_path, output_dir, config):
+def export_scene_chunks(video_path: str, output_dir: str, config: dict) -> list:
+    """Export video scenes into individual chunks using FFmpeg.
+
+    Args:
+        video_path (str): Path to the source video file.
+        output_dir (str): Directory where the exported chunks should be saved.
+        config (dict): Configuration dictionary containing parameters for scene detection and FFmpeg.
+
+    Returns:
+        list: A list of failed exports, if any.
+    """
     try:
         scenes, framerate = detect_scene_chunks(video_path, config)
 
@@ -365,17 +415,16 @@ def export_scene_chunks(video_path, output_dir, config):
         if free_space < 1024 * 1024 * 1024:  # Less than 1GB
             logger.warning("Low disk space warning! Less than 1GB available.")
 
+        # converting frame numbers to timestamps(ffmpeg format) needed to cut each scene into its own video file by ffmpeg
         for i, scene in enumerate(remaining_scenes, start=last_number+1):
             start_time = scene[0].get_frames() / framerate
             end_time = scene[1].get_frames() / framerate
             duration = end_time - start_time
-            output_path = os.path.join(
-                output_dir, config['VIDEO_TEMPLATE'].format(i))
+            output_path = os.path.join(output_dir, config['VIDEO_TEMPLATE'].format(i))
 
+            # Check if the output path already exists
             if not os.path.exists(output_path):
-                export_tasks.append(
-                    (video_path, output_path, start_time, duration, config)
-                )
+                export_tasks.append((video_path, output_path, start_time, duration, config))
 
         if not export_tasks:
             logger.info("No new cuts to export")
